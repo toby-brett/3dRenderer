@@ -1,5 +1,5 @@
 #include <emscripten/emscripten.h>
-#include <GLES2/gl2.h>
+#include <GLES3/gl3.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <emscripten/html5.h>
@@ -11,15 +11,18 @@
 
 const char *vertex_shader_src =
     "attribute vec3 position;"
+    "attribute vec4 color;"
+    "varying vec4 vColor;"
     "void main() {"
     "  gl_Position = vec4(position, 1.0);"
+    "  vColor = color;"
     "}";
 
 const char *fragment_shader_src =
     "precision mediump float;"
-    "uniform vec4 uColor;"
+    "varying vec4 vColor;"
     "void main() {"
-    "  gl_FragColor = uColor;"
+    "  gl_FragColor = vColor;"
     "}";
 
 typedef struct Object
@@ -28,6 +31,8 @@ typedef struct Object
     mesh objectMesh;
     GLuint program;
     GLuint vbo;
+    GLuint ebo; // element array buffer
+    GLuint cbo; // color buffer
     GLint colorLoc;
 
     float fTheta;
@@ -37,36 +42,18 @@ typedef struct Object
     int sw, sh;
 
     void (*init)(struct Object *self, char *sFilePath); // pointer named init - points to a function which takes struct Cube* as an arg
-    void (*render)(struct Object *self, float time_elapsed);
+    void (*render)(struct Object *self, float time_elapsed, float *vertexBuffer, float *colorBuffer, int *indexBuffer, int *vertexCount, int *colorCount, int *indexCount);
 
 } Object;
-
-typedef struct Cube
-{
-    mesh cubeMesh;
-    GLuint program;
-    GLuint vbo;
-    GLint colorLoc;
-
-    float fTheta;
-    float zPos;
-    float xPos;
-    float yPos;
-    int sw, sh;
-
-    void (*init)(struct Cube *self); // pointer named init - points to a function which takes struct Cube* as an arg
-    void (*render)(struct Cube *self, float time_elapsed);
-
-} Cube;
 
 mesh CreateMesh(char *sFilename)
 {
 
-    int MAX_OBJ_VERTICIES = 1000;
-    int MAX_OBJ_FACES = 100;
+    int MAX_OBJ_VERTICIES = 6000;
+    int MAX_OBJ_FACES = 10000;
 
-    vec3d v[MAX_OBJ_VERTICIES];
-    face f[MAX_OBJ_FACES];
+    vec3d *v = malloc(sizeof(vec3d) * MAX_OBJ_VERTICIES);
+    face *f = malloc(sizeof(vec3d) * MAX_OBJ_FACES);
 
     int v_index = 0;
     int f_index = 0;
@@ -117,11 +104,14 @@ mesh CreateMesh(char *sFilename)
         object.tris[i] = (triangle){{v[currentFace.p1], v[currentFace.p2], v[currentFace.p3]}};
     }
 
+    free(v);
+    free(f);
     return object;
 }
 
 GLuint program;
 GLuint vbo;
+GLuint vao;
 
 mat4x4 matProj;
 GLint colorLoc;
@@ -131,12 +121,22 @@ double width;
 double lastFrameTime = 0.0;
 vec3d vCamera = {0, 0, 0};
 
+#define MAX_VERTS 360000
+
+float globalVertexBuffer[MAX_VERTS];
+int globalVertexCount = 0;
+
+float globalColorBuffer[(MAX_VERTS) * 4]; // RBGA per face
+int globalColorCount = 0;
+
+int globalIndexBuffer[MAX_VERTS / 3];
+int globalIndexCount = 0;
+
 EM_BOOL keydown(int eventType, const EmscriptenKeyboardEvent *e, void *userData)
 {
 
     if (strcmp(e->key, "w") == 0)
     {
-        printf("P\n");
         object.zPos += 0.2f;
     }
     else if (strcmp(e->key, "a") == 0)
@@ -177,11 +177,8 @@ EM_BOOL on_resize(int eventType, const EmscriptenUiEvent *uiEvent, void *userDat
 
 void object_init(Object *self, char *sFileName)
 {
-
     self->program = program;
-    self->vbo = vbo;
     self->objectMesh = CreateMesh(sFileName);
-    self->colorLoc = glGetUniformLocation(self->program, "uColor");
 
     self->fTheta = 0.0f;
     self->xPos = 0.0f;
@@ -189,9 +186,35 @@ void object_init(Object *self, char *sFileName)
     self->zPos = 0.0f;
 
     glUseProgram(self->program);
+
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+
+    // --- Vertex positions
+    glGenBuffers(1, &self->vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, self->vbo);
+    glBufferData(GL_ARRAY_BUFFER, MAX_VERTS * sizeof(float), NULL, GL_DYNAMIC_DRAW);
+
+    GLint pos = glGetAttribLocation(self->program, "position");
+    glEnableVertexAttribArray(pos);
+    glVertexAttribPointer(pos, 3, GL_FLOAT, GL_FALSE, 0, 0);
+
+    // --- Color buffer
+    glGenBuffers(1, &self->cbo);
+    glBindBuffer(GL_ARRAY_BUFFER, self->cbo);
+    glBufferData(GL_ARRAY_BUFFER, MAX_VERTS * sizeof(float), NULL, GL_DYNAMIC_DRAW);
+
+    GLint col = glGetAttribLocation(self->program, "color");
+    glEnableVertexAttribArray(col);
+    glVertexAttribPointer(col, 4, GL_FLOAT, GL_FALSE, 0, 0);
+
+    // --- Index buffer
+    glGenBuffers(1, &self->ebo);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, self->ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, MAX_VERTS * sizeof(GLuint), NULL, GL_DYNAMIC_DRAW);
 }
 
-void object_render(Object *self, float time_elapsed)
+void object_render(Object *self, float time_elapsed, float *vertexBuffer, float *colorBuffer, int *indexBuffer, int *vertexCount, int *colorCount, int *indexCount)
 {
     //  transform outside loop - then apply to each trianlge
 
@@ -211,6 +234,8 @@ void object_render(Object *self, float time_elapsed)
     for (int i = 0; i < self->objectMesh.count; i++) // iterates through TRIANGLES
     {
 
+        GLuint base = (*vertexCount) / 3;
+
         triangle tri = self->objectMesh.tris[i];
 
         triangle triTransformed;
@@ -227,10 +252,12 @@ void object_render(Object *self, float time_elapsed)
 
         if (dot < 0)
         {
-
             // illumination
             vec3d light_direction = {0.0f, 0.0f, -1.0f};
-            light_direction = VectorNormalise(&light_direction);
+            //   light_direction = VectorNormalise(&light_direction);
+
+            float lightDot = dotProduct(&light_direction, &normal);
+            float color = fmaxf(0.0f, lightDot * 0.8f); // prevent negative color
 
             // project 2d - 3d
 
@@ -239,21 +266,37 @@ void object_render(Object *self, float time_elapsed)
             triProjected.p[1] = Project(&triTransformed.p[1], &matProj);
             triProjected.p[2] = Project(&triTransformed.p[2], &matProj);
 
-            PrintTri(triProjected);
+            //    glUniform4f(self->colorLoc, color, color, color, 1.0f);
 
-            float lightDot = dotProduct(&light_direction, &normal);
-            float color = 0.5f; //(lightDot) * 0.8f;
+            vertexBuffer[(*vertexCount)++] = triProjected.p[0].x;
+            vertexBuffer[(*vertexCount)++] = triProjected.p[0].y;
+            vertexBuffer[(*vertexCount)++] = triProjected.p[0].z;
 
-            glUniform4f(self->colorLoc, color, color, color, 1.0f);
+            vertexBuffer[(*vertexCount)++] = triProjected.p[1].x;
+            vertexBuffer[(*vertexCount)++] = triProjected.p[1].y;
+            vertexBuffer[(*vertexCount)++] = triProjected.p[1].z;
 
-            float verticies[] = {
-                triProjected.p[0].x, triProjected.p[0].y, triProjected.p[0].z,
-                triProjected.p[1].x, triProjected.p[1].y, triProjected.p[1].z,
-                triProjected.p[2].x, triProjected.p[2].y, triProjected.p[2].z};
+            vertexBuffer[(*vertexCount)++] = triProjected.p[2].x;
+            vertexBuffer[(*vertexCount)++] = triProjected.p[2].y;
+            vertexBuffer[(*vertexCount)++] = triProjected.p[2].z;
 
-            glBindBuffer(GL_ARRAY_BUFFER, vbo);
-            glBufferData(GL_ARRAY_BUFFER, sizeof(verticies), verticies, GL_DYNAMIC_DRAW);
-            glDrawArrays(GL_LINE_LOOP, 0, 3);
+            for (int i = 0; i < 3; i++)
+            {
+                colorBuffer[(*colorCount)++] = 1.0f;
+                colorBuffer[(*colorCount)++] = color;
+                colorBuffer[(*colorCount)++] = color;
+                colorBuffer[(*colorCount)++] = 1.0f;
+            }
+
+            // now three line‐segments p0→p1, p1→p2, p2→p0
+            indexBuffer[(*indexCount)++] = base + 0;
+            indexBuffer[(*indexCount)++] = base + 1;
+
+            indexBuffer[(*indexCount)++] = base + 1;
+            indexBuffer[(*indexCount)++] = base + 2;
+
+            indexBuffer[(*indexCount)++] = base + 2;
+            indexBuffer[(*indexCount)++] = base + 0;
         }
     }
 }
@@ -272,30 +315,53 @@ void init()
     glAttachShader(program, vs);
     glAttachShader(program, fs);
     glLinkProgram(program);
-    colorLoc = glGetUniformLocation(program, "uColor");
+
     glUseProgram(program);
-
-    glGenBuffers(1, &vbo);
-    glBindBuffer(GL_ARRAY_BUFFER, vbo);
-
-    GLint pos = glGetAttribLocation(program, "position");
-    glEnableVertexAttribArray(pos);
-    glVertexAttribPointer(pos, 3, GL_FLOAT, GL_FALSE, 0, 0);
-
     glEnable(GL_DEPTH_TEST);
 }
 
 void render()
 {
-
     double now = emscripten_get_now();
     float delta = (float)(now - lastFrameTime) / 1000; // seconds
     lastFrameTime = now;
 
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    object_render(&object, delta);
+
+    globalVertexCount = 0;
+    globalIndexCount = 0;
+    globalColorCount = 0;
+
+    object.render(&object, delta, globalVertexBuffer, globalColorBuffer, globalIndexBuffer, &globalVertexCount, &globalColorCount, &globalIndexCount);
+
+    glUseProgram(program);
+
+    // Rebind VAO and set both attribute pointers again
+    glBindVertexArray(vao);
+
+    // Rebind vertex buffer and pointer
+    glBindBuffer(GL_ARRAY_BUFFER, object.vbo);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, globalVertexCount * sizeof(float), globalVertexBuffer);
+    GLint pos = glGetAttribLocation(program, "position");
+    glEnableVertexAttribArray(pos);
+    glVertexAttribPointer(pos, 3, GL_FLOAT, GL_FALSE, 0, 0);
+
+    // Rebind color buffer and pointer
+    glBindBuffer(GL_ARRAY_BUFFER, object.cbo);
+    glBufferSubData(GL_ARRAY_BUFFER, 0, globalColorCount * sizeof(float), globalColorBuffer);
+    GLint col = glGetAttribLocation(program, "color");
+    glEnableVertexAttribArray(col);
+    glVertexAttribPointer(col, 4, GL_FLOAT, GL_FALSE, 0, 0);
+
+    // Upload index buffer
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, object.ebo);
+    glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, 0, globalIndexCount * sizeof(GLuint), globalIndexBuffer);
+
+    glDrawArrays(GL_TRIANGLES, 0, globalVertexCount / 3);
 
     float end = emscripten_get_now();
+
+    printf("%f\n", 1.0f / delta);
 }
 
 int main()
@@ -323,7 +389,7 @@ int main()
 
     object.init = object_init;
     object.render = object_render;
-    object.init(&object, "/assets/Cube.obj");
+    object.init(&object, "/assets/teapot.obj");
 
     emscripten_set_resize_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW, 0, EM_FALSE, on_resize);
     emscripten_set_keydown_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW, NULL, EM_TRUE, keydown);
