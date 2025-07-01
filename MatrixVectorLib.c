@@ -20,6 +20,12 @@ vec3d VectorAdd(vec3d *v1, vec3d *v2)
     return result;
 }
 
+vec3d VectorMultiply(vec3d *v, float f)
+{
+    vec3d o = {v->x * f, v->y * f, v->z * f, v->w * f};
+    return o;
+}
+
 vec3d VectorSubtract(vec3d *v1, vec3d *v2)
 {
     vec3d result = {
@@ -45,7 +51,7 @@ float VectorLength(vec3d *v)
     return sqrtf(v->x * v->x + v->y * v->y + v->z * v->z);
 }
 
-vec3d CrossProduct(const vec3d *a, const vec3d *b)
+vec3d CrossProduct(vec3d *a, vec3d *b)
 {
     vec3d result = {
         .x = a->y * b->z - a->z * b->y,
@@ -55,12 +61,12 @@ vec3d CrossProduct(const vec3d *a, const vec3d *b)
     return result;
 }
 
-vec3d VectorMatrixMult4d(vec3d *i, mat4x4 *m)
+vec3d VectorMatrixMult4d(vec3d *i, mat4x4 *m) // MAT * VEC
 {
     vec3d o;
     float w = 1.0f;
 
-    o.x = i->x * m->m[0][0] + i->y * m->m[0][1] + i->z * m->m[0][2] + w * m->m[0][3];
+    o.x = i->x * m->m[0][0] + i->y * m->m[0][1] + i->z * m->m[0][2] + w * m->m[0][3]; // m[0][1] is row 0 col 1
     o.y = i->x * m->m[1][0] + i->y * m->m[1][1] + i->z * m->m[1][2] + w * m->m[1][3];
     o.z = i->x * m->m[2][0] + i->y * m->m[2][1] + i->z * m->m[2][2] + w * m->m[2][3];
     o.w = i->x * m->m[3][0] + i->y * m->m[3][1] + i->z * m->m[3][2] + w * m->m[3][3];
@@ -71,17 +77,19 @@ vec3d VectorMatrixMult4d(vec3d *i, mat4x4 *m)
 vec3d Project(vec3d *i, mat4x4 *m)
 {
     vec3d o;
-    // Multiply by projection matrix (treating `m.m[col][row]`)
-    float x = i->x * m->m[0][0] + i->y * m->m[1][0] + i->z * m->m[2][0] + /*w*/ 1.0f * m->m[3][0];
-    float y = i->x * m->m[0][1] + i->y * m->m[1][1] + i->z * m->m[2][1] + m->m[3][1];
-    float z = i->x * m->m[0][2] + i->y * m->m[1][2] + i->z * m->m[2][2] + m->m[3][2];
-    float w = i->x * m->m[0][3] + i->y * m->m[1][3] + i->z * m->m[2][3] + m->m[3][3];
+    float w = 1.0f;
 
-    // Now do the perspective divide
-    o.x = x / w;
-    o.y = y / w;
-    o.z = z / w;
-    o.w = w;
+    o.x = i->x * m->m[0][0] + i->y * m->m[0][1] + i->z * m->m[0][2] + w * m->m[0][3];
+    o.y = i->x * m->m[1][0] + i->y * m->m[1][1] + i->z * m->m[1][2] + w * m->m[1][3];
+    o.z = i->x * m->m[2][0] + i->y * m->m[2][1] + i->z * m->m[2][2] + w * m->m[2][3];
+    float w_ = i->x * m->m[3][0] + i->y * m->m[3][1] + i->z * m->m[3][2] + w * m->m[3][3];
+
+    if (w_ != 0.0f)
+    {
+        o.x /= w_;
+        o.y /= w_;
+        o.z /= w_;
+    }
 
     return o;
 }
@@ -163,10 +171,11 @@ mat4x4 initProjMat(float fFov, float fAspectRatio, float fNear, float fFar)
     float q = fFar / (fFar - fNear);
 
     mat4x4 matProj = {.m = {
-                          {fAspectRatio * fFovRad, 0.0f, 0.0f, 0.0f},
-                          {0.0f, fFovRad, 0.0f, 0.0f},
-                          {0.0f, 0.0f, q, 1.0f},
-                          {0.0f, 0.0f, -fNear * q, 0.0f}}};
+                          {fAspectRatio * fFovRad, 0.0f, 0.0f, 0.0f}, // Column 0
+                          {0.0f, fFovRad, 0.0f, 0.0f},                // Column 1
+                          {0.0f, 0.0f, q, -fNear * q},                // Column 2
+                          {0.0f, 0.0f, 1.0f, 0.0f}                    // Column 3
+                      }};
 
     return matProj;
 }
@@ -199,6 +208,25 @@ mat4x4 MakeIdentity()
     return mat;
 }
 
+mat4x4 ViewMatrix(vec3d *pos, vec3d *target, vec3d *up)
+{
+    vec3d forward = VectorSubtract(target, pos);
+    forward = VectorNormalise(&forward);
+
+    vec3d a = VectorMultiply(&forward, dotProduct(up, &forward));
+    vec3d newUp = VectorSubtract(up, &a);
+    newUp = VectorNormalise(&newUp);
+
+    vec3d right = CrossProduct(&newUp, &forward);
+
+    mat4x4 matrix = {.m = {
+                         {right.x, right.y, right.z, -dotProduct(&right, pos)},
+                         {newUp.x, newUp.y, newUp.z, -dotProduct(&newUp, pos)},
+                         {forward.x, forward.y, forward.z, -dotProduct(&forward, pos)},
+                         {0.0f, 0.0f, 0.0f, 1.0f}}};
+    return matrix;
+}
+
 float dotProduct(vec3d *a, vec3d *b)
 {
     return a->x * b->x + a->y * b->y + a->z * b->z;
@@ -219,5 +247,11 @@ void PrintTri(triangle tri)
     {
         printf("p%i: (%f %f %f)\n", i, tri.p[i].x, tri.p[i].y, tri.p[i].z);
     }
+    printf("\n");
+}
+
+void PrintVec(vec3d vec)
+{
+    printf("%f %f %f \n", vec.x, vec.y, vec.z);
     printf("\n");
 }
