@@ -137,19 +137,19 @@ EM_BOOL keydown(int eventType, const EmscriptenKeyboardEvent *e, void *userData)
 
     if (strcmp(e->key, "w") == 0)
     {
-        object.zPos += 0.2f;
+        vCamera.z += 1.1f;
     }
     else if (strcmp(e->key, "a") == 0)
     {
-        object.xPos -= 0.2f;
+        vCamera.x += 1.1f;
     }
     else if (strcmp(e->key, "s") == 0)
     {
-        object.zPos -= 0.2f;
+        vCamera.z -= 1.1f;
     }
     else if (strcmp(e->key, "d") == 0)
     {
-        object.xPos += 0.2f;
+        vCamera.x -= 1.1f;
     }
 
     return EM_TRUE;
@@ -217,17 +217,23 @@ void object_init(Object *self, char *sFileName)
 void object_render(Object *self, float time_elapsed, float *vertexBuffer, float *colorBuffer, int *indexBuffer, int *vertexCount, int *colorCount, int *indexCount)
 {
     //  transform outside loop - then apply to each trianlge
-
     mat4x4 matRotX = RotationMatrixX(self->fTheta);
     mat4x4 matRotY = RotationMatrixY(self->fTheta);
     mat4x4 matRotZ = RotationMatrixZ(self->fTheta);
 
-    mat4x4 matTrans = TranslationMatrix(self->xPos, self->yPos, self->zPos);
+    mat4x4 matTrans = TranslationMatrix(self->xPos, self->yPos, self->zPos + 20.0f);
 
     mat4x4 identity = MakeIdentity();
 
     mat4x4 matWorld = MatrixMultiply(&matRotZ, &matRotX);
     matWorld = MatrixMultiply(&matTrans, &matWorld);
+
+    vec3d vUp = {0, -1, 0};
+    vec3d vLookDir = {0, 0, 1};
+
+    // vec3d vTarget = VectorAdd(&vCamera, &vLookDir);
+    vec3d vTarget = {vCamera.x, vCamera.y, vCamera.z + 1.0f};
+    mat4x4 matView = ViewMatrix(&vCamera, &vTarget, &vUp);
 
     self->fTheta += 1.0f * time_elapsed;
 
@@ -243,10 +249,17 @@ void object_render(Object *self, float time_elapsed, float *vertexBuffer, float 
         triTransformed.p[1] = VectorMatrixMult4d(&tri.p[1], &matWorld);
         triTransformed.p[2] = VectorMatrixMult4d(&tri.p[2], &matWorld);
 
-        vec3d viewDirection = VectorSubtract(&triTransformed.p[0], &vCamera);
+        triangle triViewed;
+        triViewed.p[0] = VectorMatrixMult4d(&triTransformed.p[0], &matView);
+        triViewed.p[1] = VectorMatrixMult4d(&triTransformed.p[1], &matView);
+        triViewed.p[2] = VectorMatrixMult4d(&triTransformed.p[2], &matView);
+
+        PrintTri(triViewed);
+
+        vec3d viewDirection = VectorSubtract(&triViewed.p[0], &vLookDir);
         viewDirection = VectorNormalise(&viewDirection);
 
-        vec3d normal = getNorm(&triTransformed);
+        vec3d normal = getNorm(&triViewed);
 
         float dot = dotProduct(&viewDirection, &normal);
 
@@ -259,12 +272,14 @@ void object_render(Object *self, float time_elapsed, float *vertexBuffer, float 
             float lightDot = dotProduct(&light_direction, &normal);
             float color = fmaxf(0.0f, lightDot * 0.8f); // prevent negative color
 
+            // camera space
+
             // project 2d - 3d
 
             triangle triProjected;
-            triProjected.p[0] = Project(&triTransformed.p[0], &matProj);
-            triProjected.p[1] = Project(&triTransformed.p[1], &matProj);
-            triProjected.p[2] = Project(&triTransformed.p[2], &matProj);
+            triProjected.p[0] = Project(&triViewed.p[0], &matProj);
+            triProjected.p[1] = Project(&triViewed.p[1], &matProj);
+            triProjected.p[2] = Project(&triViewed.p[2], &matProj);
 
             //    glUniform4f(self->colorLoc, color, color, color, 1.0f);
 
@@ -389,7 +404,7 @@ int main()
 
     object.init = object_init;
     object.render = object_render;
-    object.init(&object, "/assets/teapot.obj");
+    object.init(&object, "/assets/axis.obj");
 
     emscripten_set_resize_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW, 0, EM_FALSE, on_resize);
     emscripten_set_keydown_callback(EMSCRIPTEN_EVENT_TARGET_WINDOW, NULL, EM_TRUE, keydown);
